@@ -45,6 +45,9 @@ TARGET_TYPES = [
     "vc-25a", "vc25a", "vc-25b", "vc25b"
 ]
 
+# 明確に除外したい機種（E390など）
+EXCLUDE_TYPES = ["e390", "e-390", "kc390", "kc-390", "c390", "c-390"]
+
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("エラー: DISCORD_WEBHOOK_URL が設定されていません。")
 
@@ -54,15 +57,24 @@ notified_icaos = set()
 
 
 def is_target_aircraft(ac):
-    """指定機種に該当するか判定"""
+    """指定機種に該当するか判定（E-390等の誤検知を除外）"""
     ac_type = str(ac.get("t", "")).strip().lower().replace(" ", "")
     desc = str(ac.get("desc", "")).strip().lower().replace(" ", "")
 
+    # 除外対象のチェック（E-390等）
+    for exclude in EXCLUDE_TYPES:
+        exclude_clean = exclude.replace("-", "")
+        if (exclude in ac_type or exclude_clean in ac_type or
+            exclude in desc or exclude_clean in desc):
+            return False
+
+    # 監視対象のチェック
     for target in TARGET_TYPES:
         target_clean = target.replace("-", "")
         if (target in ac_type or target_clean in ac_type or
             target in desc or target_clean in desc):
             return True
+
     return False
 
 
