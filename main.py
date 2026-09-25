@@ -1,7 +1,18 @@
 import os
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
+# === Renderのポート検知をクリアするためのダミーサーバー ===
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), lambda *args: BaseHTTPRequestHandler(*args))
+    server.serve_forever()
+
+threading.Thread(target=start_dummy_server, daemon=True).start()
+
+# === 設定項目 ===
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
@@ -13,12 +24,9 @@ if not DISCORD_WEBHOOK_URL:
 
 in_air_states = {}
 
-
 def get_direction_text(track):
-    """方位角（0〜360度）を16方位（北・東・南西など）に変換"""
     if track is None or not isinstance(track, (int, float)):
         return "不明"
-    
     directions = [
         "北 (N)", "北北東 (NNE)", "北東 (NE)", "東北東 (ENE)",
         "東 (E)", "東南東 (ESE)", "南東 (SE)", "南南東 (SSE)",
@@ -28,21 +36,17 @@ def get_direction_text(track):
     idx = int((track + 11.25) / 22.5) % 16
     return f"{directions[idx]} ({int(track)}°)"
 
-
 def is_destination_japan_airport(destination_str):
     if not destination_str or destination_str in ["不明", "N/A"]:
         return False
     dest_clean = destination_str.strip().upper()
     return dest_clean.startswith(JAPAN_AIRPORT_PREFIXES)
 
-
 def get_flight_route(flight_number):
     if not FLIGHTAWARE_API_KEY or not flight_number or flight_number == "N/A":
         return "不明", "不明"
-
     url = f"https://aeroapi.flightaware.com/aeroapi/flights/{flight_number.strip()}"
     headers = {"x-apikey": FLIGHTAWARE_API_KEY}
-
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
@@ -55,9 +59,7 @@ def get_flight_route(flight_number):
                 return origin, destination
     except Exception as e:
         print(f"目的地取得エラー: {e}")
-
     return "不明", "不明"
-
 
 def send_discord_notification(icao, tail, flight, alt, track, origin, destination):
     flight_str = flight if flight else "不明"
@@ -67,10 +69,10 @@ def send_discord_notification(icao, tail, flight, alt, track, origin, destinatio
 
     if is_japan_airport:
         content_text = f"🚨 **【重要】米軍機 ({tail_str}) の目的地が「日本の空港 ({destination})」に設定されました！** @everyone"
-        embed_color = 15158332  # 赤色
+        embed_color = 15158332
     else:
         content_text = f"✈️ **米軍機の離陸を検知: {tail_str}**"
-        embed_color = 3066993   # 緑色
+        embed_color = 3066993
 
     payload = {
         "content": content_text,
@@ -97,16 +99,13 @@ def send_discord_notification(icao, tail, flight, alt, track, origin, destinatio
     except Exception as e:
         print(f"送信エラー: {e}")
 
-
 def check_military_takeoff():
     global in_air_states
-
     url = "https://api.adsb.lol/v2/mil"
     try:
         res = requests.get(url, timeout=15).json()
         ac_list = res.get("ac", [])
         if not ac_list:
-            print(f"[{time.strftime('%H:%M:%S')}] 米軍機データなし")
             return
 
         for ac in ac_list:
@@ -121,11 +120,9 @@ def check_military_takeoff():
 
             is_ground = (alt == "ground") or (isinstance(alt, (int, float)) and alt < 100)
             is_in_air_current = not is_ground
-
             is_in_air_last = in_air_states.get(icao)
 
             if is_in_air_last is False and is_in_air_current is True:
-                print(f"離陸検知！ Tail: {tail}, Flight: {flight}")
                 origin, destination = get_flight_route(flight)
                 send_discord_notification(icao, tail, flight, alt, track, origin, destination)
 
@@ -133,7 +130,6 @@ def check_military_takeoff():
 
     except Exception as e:
         print(f"チェック中エラー: {e}")
-
 
 if __name__ == "__main__":
     print("米軍機（ミリタリー機）の常時監視を開始しました...")
