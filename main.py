@@ -5,10 +5,24 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
-# === Renderのポート検知をクリアするためのダミーサーバー（完全無料バックグラウンド稼働用） ===
+# === Renderのポート検知をクリア＆501エラー解消用ダミーサーバー ===
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return  # ログをキレイに保つため無効化
+
 def start_dummy_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), lambda *args: BaseHTTPRequestHandler(*args))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
 threading.Thread(target=start_dummy_server, daemon=True).start()
@@ -20,7 +34,7 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
-# 監視対象の指定機種（判定用キーワード小文字リスト）
+# 監視対象の指定機種
 TARGET_TYPES = [
     "kc-135", "kc135",
     "rc-135", "rc135", "rc-135u", "rc135u",
@@ -34,7 +48,9 @@ TARGET_TYPES = [
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("エラー: DISCORD_WEBHOOK_URL が設定されていません。")
 
+# 機体の状態管理（前回高度情報＆通知済みリスト）
 in_air_states = {}
+notified_icaos = set()
 
 
 def is_target_aircraft(ac):
@@ -62,11 +78,9 @@ def get_nearest_airport(lat, lon):
         address = res.get("address", {})
         aeroway = address.get("aeroway") or address.get("military")
         
-        # 施設名や空港名が取れる場合はそれを表示
         if aeroway:
             return str(aeroway)
         
-        # 市町村・地域名
         location_name = (address.get("aerodrome") or 
                          address.get("city") or 
                          address.get("town") or 
@@ -78,7 +92,7 @@ def get_nearest_airport(lat, lon):
 
 
 def get_direction_text(track):
-    """方位角（0〜360度）を16方位（北・東・南西など）に変換"""
+    """方位角（0〜360度）を16方位に変換"""
     if track is None or not isinstance(track, (int, float)):
         return "不明"
     
@@ -122,7 +136,7 @@ def get_flight_route(flight_number):
     return "不明", "不明"
 
 
-def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination):
+def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, event_type="検知"):
     flight_str = flight if flight else "不明"
     tail_str = tail if tail else "不明"
     type_str = ac_type if ac_type else "対象米軍機"
@@ -133,21 +147,21 @@ def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, d
         content_text = f"🚨 **【重要】{type_str} ({tail_str}) の目的地が「日本の空港 ({destination})」に設定されました！** @everyone"
         embed_color = 15158332  # 赤色
     else:
-        content_text = f"✈️ **【特定機種検知】{type_str} 離陸: {tail_str}**"
+        content_text = f"✈️ **【特定機種{event_type}】{type_str}: {tail_str}**"
         embed_color = 3066993   # 緑色
 
     payload = {
         "content": content_text,
         "embeds": [
             {
-                "title": f"✈️ {type_str} 離陸ステータス詳細",
+                "title": f"✈️ {type_str} 飛行ステータス詳細 ({event_type})",
                 "color": embed_color,
                 "fields": [
                     {"name": "機体型式 (Type)", "value": type_str, "inline": True},
                     {"name": "機体番号 (Tail / Reg)", "value": tail_str, "inline": True},
                     {"name": "フライト番号 (Callsign)", "value": flight_str, "inline": True},
                     {"name": "ICAOコード", "value": icao.upper(), "inline": True},
-                    {"name": "高度", "value": f"{alt} ft", "inline": True},
+                    {"name": "高度", "value": f"{alt} ft" if isinstance(alt, (int, float)) else str(alt), "inline": True},
                     {"name": "🧭 進行方位（向き）", "value": direction_str, "inline": True},
                     {"name": "🛫 出発地（最寄り）", "value": origin, "inline": True},
                     {"name": "🛬 目的地", "value": destination, "inline": True},
@@ -158,13 +172,13 @@ def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, d
     }
     try:
         requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        print(f"[{time.strftime('%H:%M:%S')}] Discord通知完了: {type_str} {tail_str} ({flight_str})")
+        print(f"[{time.strftime('%H:%M:%S')}] Discord通知完了({event_type}): {type_str} {tail_str} ({flight_str})")
     except Exception as e:
         print(f"送信エラー: {e}")
 
 
 def check_military_takeoff():
-    global in_air_states
+    global in_air_states, notified_icaos
 
     url = "https://api.adsb.lol/v2/mil"
     try:
@@ -173,14 +187,17 @@ def check_military_takeoff():
         if not ac_list:
             return
 
+        current_batch_icaos = set()
+
         for ac in ac_list:
-            # 指定された対象機種でなければスキップ
             if not is_target_aircraft(ac):
                 continue
 
             icao = ac.get("hex", "").strip()
             if not icao:
                 continue
+
+            current_batch_icaos.add(icao)
 
             tail = ac.get("r", "N/A").strip()
             flight = ac.get("flight", "N/A").strip()
@@ -192,20 +209,31 @@ def check_military_takeoff():
 
             is_ground = (alt == "ground") or (isinstance(alt, (int, float)) and alt < 100)
             is_in_air_current = not is_ground
-
             is_in_air_last = in_air_states.get(icao)
 
-            # 地上 -> 飛行中 に変化した瞬間（離陸）のみ検知
-            if is_in_air_last is False and is_in_air_current is True:
-                print(f"離陸検知！ 機種: {ac_type}, Tail: {tail}, Flight: {flight}")
+            # --- 条件1: 地上 -> 飛行中 に変化した瞬間（離陸検知） ---
+            is_takeoff = (is_in_air_last is False and is_in_air_current is True)
+            
+            # --- 条件2: ADSB電波に新しく出現した（初検知） ---
+            is_new_detection = (icao not in notified_icaos and is_in_air_current)
+
+            if is_takeoff or is_new_detection:
+                event_type = "離陸" if is_takeoff else "検知"
+                print(f"【{event_type}】 機種: {ac_type}, Tail: {tail}, Flight: {flight}")
                 
-                # 出発地：FlightAware APIで取れなければ、検知座標から最寄り地点・空港を取得
                 fa_origin, destination = get_flight_route(flight)
                 origin = fa_origin if fa_origin != "不明" else get_nearest_airport(lat, lon)
                 
-                send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination)
+                send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, event_type)
+                
+                # 重複通知防止フラグを立てる
+                notified_icaos.add(icao)
 
+            # 状態更新
             in_air_states[icao] = is_in_air_current
+
+        # ADSB受信圏外（着陸・見失った）になった機体は通知済みセットから消去し、次回離陸時に再反応できるようにする
+        notified_icaos = notified_icaos.intersection(current_batch_icaos)
 
     except Exception as e:
         print(f"チェック中エラー: {e}")
