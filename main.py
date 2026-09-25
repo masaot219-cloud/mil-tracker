@@ -36,13 +36,28 @@ JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
 # 監視対象の指定機種
 TARGET_TYPES = [
+    # C-135 / RC-135 / KC-135 派生
     "kc-135", "kc135",
     "rc-135", "rc135", "rc-135u", "rc135u",
     "ec-135", "ec135",
     "wc-135", "wc135",
-    "e-3", "e3", "e-3g", "e3g", "e-3b", "e3b", "e-3a", "e3a", "e-3c", "e3c", "e-3d", "e3d",
+    
+    # E-3 (AWACS) 関連 (E-390対策で具体名指定)
+    "e-3a", "e3a", "e-3b", "e3b", "e-3c", "e3c", "e-3d", "e3d", "e-3g", "e3g", "e-3tf", "e3tf", "sentry",
+    
+    # E-4 / VC-25
     "e-4a", "e4a", "e-4b", "e4b", "e-4c", "e4c",
-    "vc-25a", "vc25a", "vc-25b", "vc25b"
+    "vc-25a", "vc25a", "vc-25b", "vc25b",
+
+    # Boeing 707 全般 & 派生機 (B707, B703, E-6, E-8, C-137, Boeing 707 等)
+    "b707", "b-707", "b703", "b-703", "boeing707", "boeing 707", "707",
+    "e-6", "e6", "e-8", "e8", "c-137", "c137",
+
+    # KDC-10 / DC-10 タンク機
+    "kdc-10", "kdc10", "dc-10", "dc10", "kdc103",
+
+    # オメガ・タンカー (Omega Aerial Refueling)
+    "omega", "omg", "omega air"
 ]
 
 # 明確に除外したい機種（E390など）
@@ -57,31 +72,34 @@ notified_icaos = set()
 
 
 def is_target_aircraft(ac):
-    """指定機種に該当するか判定（E-390等の誤検知を除外）"""
+    """指定機種・オペレーターに該当するか判定"""
     ac_type = str(ac.get("t", "")).strip().lower().replace(" ", "")
     desc = str(ac.get("desc", "")).strip().lower().replace(" ", "")
+    ownOp = str(ac.get("ownOp", "")).strip().lower()
+    flight = str(ac.get("flight", "")).strip().lower()
 
-    # 除外対象のチェック（E-390等）
+    # 1. 除外対象のチェック（E-390等）
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
             exclude in desc or exclude_clean in desc):
             return False
 
-    # 監視対象のチェック
+    # 2. 監視対象のチェック
     for target in TARGET_TYPES:
         target_clean = target.replace("-", "")
         if (target in ac_type or target_clean in ac_type or
-            target in desc or target_clean in desc):
+            target in desc or target_clean in desc or
+            target in ownOp or target in flight):
             return True
 
     return False
 
 
-def get_nearest_airport(lat, lon):
-    """緯度・経度から最寄りの空港/基地または主要エリアを取得"""
+def get_location_name(lat, lon):
+    """緯度・経度から場所名（市区町村・周辺基地など）を取得"""
     if lat is None or lon is None:
-        return "不明"
+        return "位置情報なし"
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10"
         headers = {"User-Agent": "ADSB-Military-Tracker/1.0"}
@@ -91,14 +109,17 @@ def get_nearest_airport(lat, lon):
         aeroway = address.get("aeroway") or address.get("military")
         
         if aeroway:
-            return str(aeroway)
+            return f"{aeroway} 周辺"
         
         location_name = (address.get("aerodrome") or 
                          address.get("city") or 
                          address.get("town") or 
                          address.get("county") or 
-                         address.get("state") or "付近")
-        return f"{location_name} 周辺"
+                         address.get("state") or "")
+        
+        if location_name:
+            return f"{location_name} 上空/周辺"
+        return f"座標 ({round(lat, 2)}, {round(lon, 2)})"
     except Exception:
         return f"座標 ({round(lat, 2)}, {round(lon, 2)})"
 
@@ -148,10 +169,10 @@ def get_flight_route(flight_number):
     return "不明", "不明"
 
 
-def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, event_type="検知"):
+def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, location_str, event_type="検知"):
     flight_str = flight if flight else "不明"
     tail_str = tail if tail else "不明"
-    type_str = ac_type if ac_type else "対象米軍機"
+    type_str = ac_type if ac_type else "対象機"
     direction_str = get_direction_text(track)
     is_japan_airport = is_destination_japan_airport(destination)
 
@@ -175,7 +196,8 @@ def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, d
                     {"name": "ICAOコード", "value": icao.upper(), "inline": True},
                     {"name": "高度", "value": f"{alt} ft" if isinstance(alt, (int, float)) else str(alt), "inline": True},
                     {"name": "🧭 進行方位（向き）", "value": direction_str, "inline": True},
-                    {"name": "🛫 出発地（最寄り）", "value": origin, "inline": True},
+                    {"name": "📍 反応位置（現在地）", "value": location_str, "inline": False},
+                    {"name": "🛫 出発地", "value": origin, "inline": True},
                     {"name": "🛬 目的地", "value": destination, "inline": True},
                 ],
                 "footer": {"text": "ADSB Military Tracker"}
@@ -233,10 +255,11 @@ def check_military_takeoff():
                 event_type = "離陸" if is_takeoff else "検知"
                 print(f"【{event_type}】 機種: {ac_type}, Tail: {tail}, Flight: {flight}")
                 
+                location_str = get_location_name(lat, lon)
                 fa_origin, destination = get_flight_route(flight)
-                origin = fa_origin if fa_origin != "不明" else get_nearest_airport(lat, lon)
+                origin = fa_origin if fa_origin != "不明" else location_str
                 
-                send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, event_type)
+                send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, location_str, event_type)
                 
                 # 重複通知防止フラグを立てる
                 notified_icaos.add(icao)
@@ -244,7 +267,7 @@ def check_military_takeoff():
             # 状態更新
             in_air_states[icao] = is_in_air_current
 
-        # ADSB受信圏外（着陸・見失った）になった機体は通知済みセットから消去し、次回離陸時に再反応できるようにする
+        # ADSB受信圏外（着陸・見失った）になった機体は通知済みセットから消去
         notified_icaos = notified_icaos.intersection(current_batch_icaos)
 
     except Exception as e:
@@ -252,7 +275,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print("指定機種（KC-135, RC-135系, EC-135, WC-135, E-3系, E-4系, VC-25系）の監視を開始しました...")
+    print("指定機種の監視を開始しました...")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
