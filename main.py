@@ -34,7 +34,15 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
-# 監視対象の指定機種
+# 1. 許可する指定運用者（USAF, US Navy, USMC, Omega Tanker）
+ALLOWED_OPERATORS = [
+    "us air force", "usaf", "united states air force",
+    "us navy", "usn", "united states navy",
+    "us marine corps", "usmc", "united states marine corps",
+    "omega air", "omega aerial refueling", "omega tanker"
+]
+
+# 2. 監視対象の指定機種（誤検知防止のため具体的な表記・型式を指定）
 TARGET_TYPES = [
     # C-135 / RC-135 / KC-135 派生
     "kc-135", "kc135",
@@ -49,19 +57,20 @@ TARGET_TYPES = [
     "e-4a", "e4a", "e-4b", "e4b", "e-4c", "e4c",
     "vc-25a", "vc25a", "vc-25b", "vc25b",
 
-    # Boeing 707 全般 & 派生機 (B707, B703, E-6, E-8, C-137, Boeing 707 等)
-    "b707", "b-707", "b703", "b-703", "boeing707", "boeing 707", "707",
+    # Boeing 707 全般 & 派生機 (B707, B703, E-6, E-8, C-137 等)
+    "b707", "b-707", "b703", "b-703", "boeing707", "boeing 707",
     "e-6", "e6", "e-8", "e8", "c-137", "c137",
 
     # KDC-10 / DC-10 タンク機
-    "kdc-10", "kdc10", "dc-10", "dc10", "kdc103",
-
-    # オメガ・タンカー (Omega Aerial Refueling)
-    "omega", "omg", "omega air"
+    "kdc-10", "kdc10", "dc-10", "dc10", "kdc103"
 ]
 
-# 明確に除外したい機種（E390など）
-EXCLUDE_TYPES = ["e390", "e-390", "kc390", "kc-390", "c390", "c-390"]
+# 3. 明確に除外したい機種（E390やヘリコプター全般）
+EXCLUDE_TYPES = [
+    "e390", "e-390", "kc390", "kc-390", "c390", "c-390",
+    "h60", "h-60", "mh60", "mh-60", "sh60", "sh-60", "hh60", "hh-60", "uh60", "uh-60",
+    "blackhawk", "seahawk", "jayhawk", "knighthawk"
+]
 
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("エラー: DISCORD_WEBHOOK_URL が設定されていません。")
@@ -72,25 +81,37 @@ notified_icaos = set()
 
 
 def is_target_aircraft(ac):
-    """指定機種・オペレーターに該当するか判定"""
+    """USAF / US Navy / USMC / Omega Air かつ指定機種のみに判定を絞り込み"""
     ac_type = str(ac.get("t", "")).strip().lower().replace(" ", "")
     desc = str(ac.get("desc", "")).strip().lower().replace(" ", "")
-    ownOp = str(ac.get("ownOp", "")).strip().lower()
-    flight = str(ac.get("flight", "")).strip().lower()
+    own_op = str(ac.get("ownOp", "")).strip().lower()
 
-    # 1. 除外対象のチェック（E-390等）
+    # 1. 除外対象のチェック（E-390・ヘリコプター等）
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
             exclude in desc or exclude_clean in desc):
             return False
 
-    # 2. 監視対象のチェック
+    # 2. 運用者（Operator）のチェック（指定された米3軍またはOmegaに属しているか）
+    # ※ ownOp情報が空の場合は対象機種（TARGET_TYPES）に一致していれば判定を通します
+    is_allowed_op = False
+    if own_op:
+        for op in ALLOWED_OPERATORS:
+            if op in own_op:
+                is_allowed_op = True
+                break
+    else:
+        is_allowed_op = True  # APIデータ側にownOpが無い場合は機種判定のみに委ねる
+
+    if not is_allowed_op:
+        return False
+
+    # 3. 監視対象機種のチェック
     for target in TARGET_TYPES:
         target_clean = target.replace("-", "")
         if (target in ac_type or target_clean in ac_type or
-            target in desc or target_clean in desc or
-            target in ownOp or target in flight):
+            target in desc or target_clean in desc):
             return True
 
     return False
@@ -169,10 +190,11 @@ def get_flight_route(flight_number):
     return "不明", "不明"
 
 
-def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, location_str, event_type="検知"):
+def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, origin, destination, location_str, event_type="検知"):
     flight_str = flight if flight else "不明"
     tail_str = tail if tail else "不明"
     type_str = ac_type if ac_type else "対象機"
+    op_str = own_op if own_op else "米軍/関連機関"
     direction_str = get_direction_text(track)
     is_japan_airport = is_destination_japan_airport(destination)
 
@@ -191,6 +213,7 @@ def send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, d
                 "color": embed_color,
                 "fields": [
                     {"name": "機体型式 (Type)", "value": type_str, "inline": True},
+                    {"name": "所属/運用者 (Operator)", "value": op_str, "inline": True},
                     {"name": "機体番号 (Tail / Reg)", "value": tail_str, "inline": True},
                     {"name": "フライト番号 (Callsign)", "value": flight_str, "inline": True},
                     {"name": "ICAOコード", "value": icao.upper(), "inline": True},
@@ -236,6 +259,7 @@ def check_military_takeoff():
             tail = ac.get("r", "N/A").strip()
             flight = ac.get("flight", "N/A").strip()
             ac_type = ac.get("t", ac.get("desc", "不明")).strip()
+            own_op = ac.get("ownOp", "不明").strip()
             alt = ac.get("alt_baro")
             track = ac.get("track")
             lat = ac.get("lat")
@@ -259,7 +283,7 @@ def check_military_takeoff():
                 fa_origin, destination = get_flight_route(flight)
                 origin = fa_origin if fa_origin != "不明" else location_str
                 
-                send_discord_notification(icao, tail, flight, ac_type, alt, track, origin, destination, location_str, event_type)
+                send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, origin, destination, location_str, event_type)
                 
                 # 重複通知防止フラグを立てる
                 notified_icaos.add(icao)
@@ -275,7 +299,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print("指定機種の監視を開始しました...")
+    print("指定運用者（USAF, US Navy, USMC, Omega Tanker）の監視を開始しました...")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
