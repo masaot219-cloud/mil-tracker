@@ -42,7 +42,7 @@ ALLOWED_OPERATORS = [
     "omega air", "omega aerial refueling", "omega tanker"
 ]
 
-# 2. 監視対象の指定機種（誤検知防止のため具体的な表記・型式を指定）
+# 2. 監視対象の指定機種
 TARGET_TYPES = [
     # C-135 / RC-135 / KC-135 派生
     "kc-135", "kc135",
@@ -50,7 +50,7 @@ TARGET_TYPES = [
     "ec-135", "ec135",
     "wc-135", "wc135",
     
-    # E-3 (AWACS) 関連 (E-390対策で具体名指定)
+    # E-3 (AWACS) 関連
     "e-3a", "e3a", "e-3b", "e3b", "e-3c", "e3c", "e-3d", "e3d", "e-3g", "e3g", "e-3tf", "e3tf", "sentry",
     
     # E-4 / VC-25
@@ -86,15 +86,14 @@ def is_target_aircraft(ac):
     desc = str(ac.get("desc", "")).strip().lower().replace(" ", "")
     own_op = str(ac.get("ownOp", "")).strip().lower()
 
-    # 1. 除外対象のチェック（E-390・ヘリコプター等）
+    # 1. 除外対象のチェック
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
             exclude in desc or exclude_clean in desc):
             return False
 
-    # 2. 運用者（Operator）のチェック（指定された米3軍またはOmegaに属しているか）
-    # ※ ownOp情報が空の場合は対象機種（TARGET_TYPES）に一致していれば判定を通します
+    # 2. 運用者（Operator）のチェック
     is_allowed_op = False
     if own_op:
         for op in ALLOWED_OPERATORS:
@@ -102,7 +101,7 @@ def is_target_aircraft(ac):
                 is_allowed_op = True
                 break
     else:
-        is_allowed_op = True  # APIデータ側にownOpが無い場合は機種判定のみに委ねる
+        is_allowed_op = True
 
     if not is_allowed_op:
         return False
@@ -118,9 +117,12 @@ def is_target_aircraft(ac):
 
 
 def get_location_name(lat, lon):
-    """緯度・経度から場所名（市区町村・周辺基地など）を取得"""
+    """緯度・経度から地名・施設名を取得し、座標情報も併記して返す"""
     if lat is None or lon is None:
         return "位置情報なし"
+    
+    coord_str = f"({round(lat, 4)}, {round(lon, 4)})"
+    
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10"
         headers = {"User-Agent": "ADSB-Military-Tracker/1.0"}
@@ -130,7 +132,7 @@ def get_location_name(lat, lon):
         aeroway = address.get("aeroway") or address.get("military")
         
         if aeroway:
-            return f"{aeroway} 周辺"
+            return f"{aeroway} 周辺 {coord_str}"
         
         location_name = (address.get("aerodrome") or 
                          address.get("city") or 
@@ -139,10 +141,10 @@ def get_location_name(lat, lon):
                          address.get("state") or "")
         
         if location_name:
-            return f"{location_name} 上空/周辺"
-        return f"座標 ({round(lat, 2)}, {round(lon, 2)})"
+            return f"{location_name} 上空/周辺 {coord_str}"
+        return f"座標 {coord_str}"
     except Exception:
-        return f"座標 ({round(lat, 2)}, {round(lon, 2)})"
+        return f"座標 {coord_str}"
 
 
 def get_direction_text(track):
@@ -219,7 +221,7 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
                     {"name": "ICAOコード", "value": icao.upper(), "inline": True},
                     {"name": "高度", "value": f"{alt} ft" if isinstance(alt, (int, float)) else str(alt), "inline": True},
                     {"name": "🧭 進行方位（向き）", "value": direction_str, "inline": True},
-                    {"name": "📍 反応位置（現在地）", "value": location_str, "inline": False},
+                    {"name": "📍 反応位置（地名＆座標）", "value": location_str, "inline": False},
                     {"name": "🛫 出発地", "value": origin, "inline": True},
                     {"name": "🛬 目的地", "value": destination, "inline": True},
                 ],
@@ -299,7 +301,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print("指定運用者（USAF, US Navy, USMC, Omega Tanker）の監視を開始しました...")
+    print("指定運用者の監視を開始しました...")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
