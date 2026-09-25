@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        return  # ログをキレイに保つため無効化
+        return  # ログ無効化
 
 def start_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -42,19 +42,19 @@ ALLOWED_OPERATORS = [
     "omega air", "omega aerial refueling", "omega tanker"
 ]
 
-# 2. 米軍特有の代表的コールサイン（National/NCRを除外）
+# 2. 米軍特有の代表的コールサイン（RCH / REACH / NCR を除外）
 TARGET_CALLSIGNS = [
     "sentry",    # E-3 AWACS
     "recon", "jake", "cobra", "snoop", "bolt", "pyton", "olay", # RC-135 / WC-135 / OC-135
-    "hobo", "gold", "ethyl", "teal", "qid", "m35", "reach", "rch", "boeing" # Tanker / C-135系 / USAF
+    "hobo", "gold", "ethyl", "teal", "qid", "m35", "boeing" # Tanker / C-135系 / USAF
 ]
 
-# 3. 監視対象の指定機種（ADS-B表記に完全対応 / W135含む軍用機メイン）
+# 3. 監視対象の指定機種（ADS-B表記に対応）
 TARGET_TYPES = [
     # C-135 派生 (KC / RC / WC / EC / OC / NC / TC / W135)
     "k35r", "k35q", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
     "r135", "rc135", "rc-135",
-    "w135", "wc135", "wc-135", "wc135w", "wc135c", # WC-135 (Constant Phoenix)
+    "w135", "wc135", "wc-135", "wc135w", "wc135c",
     "ec135", "ec-135", "oc135", "oc-135",
     
     # E-3 (AWACS) 関連
@@ -69,7 +69,7 @@ TARGET_TYPES = [
     "kdc10", "kdc-10", "dc10", "dc-10", "dc103"
 ]
 
-# 4. 明確に除外したい機種（ヘリ・小型機・E390等）
+# 4. 明確に除外したい機種（ヘリ・小型機等）
 EXCLUDE_TYPES = [
     "e390", "e-390", "kc390", "kc-390", "c390", "c-390",
     "h60", "h-60", "mh60", "mh-60", "sh60", "sh-60", "hh60", "hh-60", "uh60", "uh-60",
@@ -79,20 +79,47 @@ EXCLUDE_TYPES = [
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("エラー: DISCORD_WEBHOOK_URL が設定されていません。")
 
-# 機体の状態管理（前回高度情報＆通知済みリスト）
+# 機体の状態管理
 in_air_states = {}
 notified_icaos = set()
 
 
+def get_embed_color(ac_type, is_japan_destination):
+    """機種や目的地に応じてEmbed通知の枠線の色（HEXカラーコード）を切り替える"""
+    if is_japan_destination:
+        return 0xFF0000  # 赤色（日本目的地・最高警戒）
+
+    type_clean = ac_type.lower().replace(" ", "").replace("-", "")
+
+    # 1. 偵察・特殊大気採取機 (RC-135, WC-135, OC-135, W135) -> 紫色
+    if any(k in type_clean for k in ["w135", "wc135", "r135", "rc135", "oc135", "ec135"]):
+        return 0x9B59B6  # 紫色
+
+    # 2. 早期警戒機 (E-3 AWACS) -> 黄色
+    if any(k in type_clean for k in ["e3", "sentry"]):
+        return 0xF1C40F  # 黄色
+
+    # 3. 空中給油機 (KC-135, KDC-10, Omega) -> オレンジ色
+    if any(k in type_clean for k in ["k35", "kc135", "c135", "kdc10", "dc10"]):
+        return 0xE67E22  # オレンジ色
+
+    # 4. 司令部機 / VIP機 (E-4B, VC-25, E-6B, E-8C) -> 濃い赤/ワインレッド
+    if any(k in type_clean for k in ["e4", "vc25", "e6", "e8"]):
+        return 0x900C3F  # 濃い赤
+
+    # 5. その他 -> 青色
+    return 0x3498DB  # 青色
+
+
 def is_target_aircraft(ac):
-    """米軍特殊機専用の超強力判定ロジック (National除外)"""
+    """米軍特殊機専用の判定ロジック (National / RCH / REACH 除外)"""
     ac_type = str(ac.get("t", "")).strip().lower().replace(" ", "")
     desc = str(ac.get("desc", "")).strip().lower()
     own_op = str(ac.get("ownOp", "")).strip().lower()
     flight = str(ac.get("flight", "")).strip().lower()
 
-    # --- 1. National Airlines (NCR) 徹底除外 ---
-    if "national air" in own_op or flight.startswith("ncr"):
+    # --- 1. National Airlines (NCR) / 通常輸送コールサイン (RCH/REACH) 除外 ---
+    if "national air" in own_op or flight.startswith("ncr") or flight.startswith("rch") or flight.startswith("reach"):
         return False
 
     # --- 2. その他除外フィルター ---
@@ -102,7 +129,7 @@ def is_target_aircraft(ac):
             exclude in desc or exclude_clean in desc):
             return False
 
-    # --- 3. 判定(A): 米軍有名コールサイン（SENTRY, RECON, SNOOP等）による強力一致 ---
+    # --- 3. 判定(A): 米軍有名コールサインによるチェック ---
     is_target_callsign = any(cs in flight for cs in TARGET_CALLSIGNS)
 
     # --- 4. 判定(B): 運用者（Operator）のチェック ---
@@ -110,14 +137,12 @@ def is_target_aircraft(ac):
     if own_op:
         is_allowed_op = any(op in own_op for op in ALLOWED_OPERATORS)
     else:
-        # ownOp情報がない場合はコールサインか型式でカバーするため通過させる
         is_allowed_op = True
 
     # --- 5. 判定(C): 機種コード / 説明文のチェック ---
     desc_clean = desc.replace(" ", "").replace("-", "")
     is_target_type = False
 
-    # (C-1) TARGET_TYPES との完全・部分一致
     for target in TARGET_TYPES:
         target_clean = target.replace("-", "")
         if (target == ac_type or target_clean == ac_type or
@@ -125,7 +150,6 @@ def is_target_aircraft(ac):
             is_target_type = True
             break
 
-    # (C-2) 機体型式が135系/707系/W135等のキーワードを含んでいるか補助チェック
     if not is_target_type:
         if any(k in ac_type or k in desc for k in ["135", "w135", "sentry", "boeing707", "b707", "kdc10", "vc25", "e-3", "e-4", "e-6", "e-8"]):
             is_target_type = True
@@ -141,7 +165,7 @@ def is_target_aircraft(ac):
 
 
 def get_location_name(lat, lon):
-    """緯度・経度から地名・施設名を取得し、座標情報も併記して返す"""
+    """緯度・経度から地名・施設名を取得"""
     if lat is None or lon is None:
         return "位置情報なし"
     
@@ -172,7 +196,7 @@ def get_location_name(lat, lon):
 
 
 def get_direction_text(track):
-    """方位角（0〜360度）を16方位に変換"""
+    """方位角を16方位に変換"""
     if track is None or not isinstance(track, (int, float)):
         return "不明"
     
@@ -224,12 +248,13 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
     direction_str = get_direction_text(track)
     is_japan_airport = is_destination_japan_airport(destination)
 
+    # 動的カラー適用
+    embed_color = get_embed_color(type_str, is_japan_airport)
+
     if is_japan_airport:
         content_text = f"🚨 **【重要】{type_str} ({tail_str}) の目的地が「日本の空港 ({destination})」に設定されました！** @everyone"
-        embed_color = 15158332  # 赤色
     else:
         content_text = f"✈️ **【米軍機{event_type}】{type_str}: {tail_str} (Callsign: {flight_str})**"
-        embed_color = 3066993   # 緑色
 
     payload = {
         "content": content_text,
@@ -295,10 +320,7 @@ def check_military_takeoff():
             is_in_air_current = not is_ground
             is_in_air_last = in_air_states.get(icao)
 
-            # --- 条件1: 地上 -> 飛行中 に変化した瞬間（離陸検知） ---
             is_takeoff = (is_in_air_last is False and is_in_air_current is True)
-            
-            # --- 条件2: ADSB電波に新しく出現した（初検知） ---
             is_new_detection = (icao not in notified_icaos and is_in_air_current)
 
             if is_takeoff or is_new_detection:
@@ -311,13 +333,10 @@ def check_military_takeoff():
                 
                 send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, origin, destination, location_str, event_type)
                 
-                # 重複通知防止フラグを立てる
                 notified_icaos.add(icao)
 
-            # 状態更新
             in_air_states[icao] = is_in_air_current
 
-        # ADSB受信圏外（着陸・見失った）になった機体は通知済みセットから消去
         notified_icaos = notified_icaos.intersection(current_batch_icaos)
 
     except Exception as e:
@@ -325,7 +344,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print("米軍機・特殊機（USAF, Navy, USMC, Omega Tanker）の強化監視を開始しました...")
+    print("米軍機・特殊機の強化監視（RCH除外・色分け機能付き）を開始しました...")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
