@@ -2,6 +2,7 @@ import os
 import time
 import math
 import threading
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
@@ -30,7 +31,8 @@ threading.Thread(target=start_dummy_server, daemon=True).start()
 # === 設定項目 ===
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
+# CHECK_INTERVAL をデフォルト 1800 (30分) に設定
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "1800"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
@@ -288,6 +290,9 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
 def check_military_takeoff():
     global in_air_states, notified_icaos
 
+    # チェック実行時に現在日時を出力
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] データをチェック中...")
+
     url = "https://api.adsb.lol/v2/mil"
     try:
         res = requests.get(url, timeout=15).json()
@@ -344,7 +349,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print("米軍機・特殊機の強化監視（RCH除外・色分け機能付き）を開始しました...")
+    print(f"米軍機・特殊機の強化監視（RCH除外・色分け機能付き）を開始しました... 間隔: {CHECK_INTERVAL}秒")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
