@@ -34,7 +34,7 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
-# 1. 許可する指定運用者（USAF, US Navy, USMC, Omega Tanker）
+# 1. 許可する指定運用者（National除外、純米軍＋オメガ空中給油機）
 ALLOWED_OPERATORS = [
     "us air force", "usaf", "united states air force",
     "us navy", "usn", "united states navy",
@@ -42,30 +42,34 @@ ALLOWED_OPERATORS = [
     "omega air", "omega aerial refueling", "omega tanker"
 ]
 
-# 2. 監視対象の指定機種
-TARGET_TYPES = [
-    # C-135 / RC-135 / KC-135 派生
-    "kc-135", "kc135",
-    "rc-135", "rc135", "rc-135u", "rc135u",
-    "ec-135", "ec135",
-    "wc-135", "wc135",
-    
-    # E-3 (AWACS) 関連
-    "e-3a", "e3a", "e-3b", "e3b", "e-3c", "e3c", "e-3d", "e3d", "e-3g", "e3g", "e-3tf", "e3tf", "sentry",
-    
-    # E-4 / VC-25
-    "e-4a", "e4a", "e-4b", "e4b", "e-4c", "e4c",
-    "vc-25a", "vc25a", "vc-25b", "vc25b",
-
-    # Boeing 707 全般 & 派生機 (B707, B703, E-6, E-8, C-137 等)
-    "b707", "b-707", "b703", "b-703", "boeing707", "boeing 707",
-    "e-6", "e6", "e-8", "e8", "c-137", "c137",
-
-    # KDC-10 / DC-10 タンク機
-    "kdc-10", "kdc10", "dc-10", "dc10", "kdc103"
+# 2. 米軍特有の代表的コールサイン（National/NCRを除外）
+TARGET_CALLSIGNS = [
+    "sentry",    # E-3 AWACS
+    "recon", "jake", "cobra", "snoop", "bolt", "pyton", "olay", # RC-135 / WC-135 / OC-135
+    "hobo", "gold", "ethyl", "teal", "qid", "m35", "reach", "rch", "boeing" # Tanker / C-135系 / USAF
 ]
 
-# 3. 明確に除外したい機種（E390やヘリコプター全般）
+# 3. 監視対象の指定機種（ADS-B表記に完全対応 / W135含む軍用機メイン）
+TARGET_TYPES = [
+    # C-135 派生 (KC / RC / WC / EC / OC / NC / TC / W135)
+    "k35r", "k35q", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
+    "r135", "rc135", "rc-135",
+    "w135", "wc135", "wc-135", "wc135w", "wc135c", # WC-135 (Constant Phoenix)
+    "ec135", "ec-135", "oc135", "oc-135",
+    
+    # E-3 (AWACS) 関連
+    "e3tf", "e3cf", "e3a", "e3b", "e3c", "e3d", "e3g", "e3", "e-3", "sentry",
+    
+    # E-4 / VC-25 / E-6 / E-8 / B707派生
+    "e4", "e4b", "e-4b", "vc25", "vc25a", "vc-25a", "vc25b", "vc-25b",
+    "b707", "b-707", "b703", "b-703", "boeing707", "boeing 707",
+    "e6", "e-6", "e6b", "e-6b", "e8", "e-8", "e8c", "e-8c", "c137", "c-137",
+
+    # KDC-10 / DC-10 タンク機
+    "kdc10", "kdc-10", "dc10", "dc-10", "dc103"
+]
+
+# 4. 明確に除外したい機種（ヘリ・小型機・E390等）
 EXCLUDE_TYPES = [
     "e390", "e-390", "kc390", "kc-390", "c390", "c-390",
     "h60", "h-60", "mh60", "mh-60", "sh60", "sh-60", "hh60", "hh-60", "uh60", "uh-60",
@@ -81,37 +85,57 @@ notified_icaos = set()
 
 
 def is_target_aircraft(ac):
-    """USAF / US Navy / USMC / Omega Air かつ指定機種のみに判定を絞り込み"""
+    """米軍特殊機専用の超強力判定ロジック (National除外)"""
     ac_type = str(ac.get("t", "")).strip().lower().replace(" ", "")
-    desc = str(ac.get("desc", "")).strip().lower().replace(" ", "")
+    desc = str(ac.get("desc", "")).strip().lower()
     own_op = str(ac.get("ownOp", "")).strip().lower()
+    flight = str(ac.get("flight", "")).strip().lower()
 
-    # 1. 除外対象のチェック
+    # --- 1. National Airlines (NCR) 徹底除外 ---
+    if "national air" in own_op or flight.startswith("ncr"):
+        return False
+
+    # --- 2. その他除外フィルター ---
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
             exclude in desc or exclude_clean in desc):
             return False
 
-    # 2. 運用者（Operator）のチェック
+    # --- 3. 判定(A): 米軍有名コールサイン（SENTRY, RECON, SNOOP等）による強力一致 ---
+    is_target_callsign = any(cs in flight for cs in TARGET_CALLSIGNS)
+
+    # --- 4. 判定(B): 運用者（Operator）のチェック ---
     is_allowed_op = False
     if own_op:
-        for op in ALLOWED_OPERATORS:
-            if op in own_op:
-                is_allowed_op = True
-                break
+        is_allowed_op = any(op in own_op for op in ALLOWED_OPERATORS)
     else:
+        # ownOp情報がない場合はコールサインか型式でカバーするため通過させる
         is_allowed_op = True
 
-    if not is_allowed_op:
-        return False
+    # --- 5. 判定(C): 機種コード / 説明文のチェック ---
+    desc_clean = desc.replace(" ", "").replace("-", "")
+    is_target_type = False
 
-    # 3. 監視対象機種のチェック
+    # (C-1) TARGET_TYPES との完全・部分一致
     for target in TARGET_TYPES:
         target_clean = target.replace("-", "")
-        if (target in ac_type or target_clean in ac_type or
-            target in desc or target_clean in desc):
-            return True
+        if (target == ac_type or target_clean == ac_type or
+            target in desc or target_clean in desc_clean):
+            is_target_type = True
+            break
+
+    # (C-2) 機体型式が135系/707系/W135等のキーワードを含んでいるか補助チェック
+    if not is_target_type:
+        if any(k in ac_type or k in desc for k in ["135", "w135", "sentry", "boeing707", "b707", "kdc10", "vc25", "e-3", "e-4", "e-6", "e-8"]):
+            is_target_type = True
+
+    # --- 最終判定 ---
+    if is_target_callsign:
+        return True
+
+    if is_allowed_op and is_target_type:
+        return True
 
     return False
 
@@ -204,7 +228,7 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
         content_text = f"🚨 **【重要】{type_str} ({tail_str}) の目的地が「日本の空港 ({destination})」に設定されました！** @everyone"
         embed_color = 15158332  # 赤色
     else:
-        content_text = f"✈️ **【特定機種{event_type}】{type_str}: {tail_str}**"
+        content_text = f"✈️ **【米軍機{event_type}】{type_str}: {tail_str} (Callsign: {flight_str})**"
         embed_color = 3066993   # 緑色
 
     payload = {
@@ -301,7 +325,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print("指定運用者の監視を開始しました...")
+    print("米軍機・特殊機（USAF, Navy, USMC, Omega Tanker）の強化監視を開始しました...")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
