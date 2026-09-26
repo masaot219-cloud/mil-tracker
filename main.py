@@ -32,7 +32,9 @@ threading.Thread(target=start_dummy_server, daemon=True).start()
 # === 2. 設定項目 ===
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "1800"))
+
+# 【要請対応】チェック間隔を一時的に 60秒 に設定
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
@@ -50,9 +52,9 @@ TARGET_CALLSIGNS = [
     "hobo", "gold", "ethyl", "teal", "qid", "m35", "boeing"
 ]
 
-# 【修正・完全版】監視対象の正確な機種コード（ADS-B表記に対応）
+# 監視対象の機種コード（C-17 や P-8 は除外リストに移したためここから削除）
 TARGET_TYPES = [
-    # KC-135 派生 (正しく K35R / KC35 などを網羅)
+    # KC-135 派生
     "k35r", "k35q", "k35t", "kc35", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
     "r135", "rc13", "rc135", "rc-135",
     "w135", "wc135", "wc-135", "wc135w", "wc135c",
@@ -61,16 +63,15 @@ TARGET_TYPES = [
     # E-3 (AWACS) 関連
     "e3tf", "e3cf", "e3a", "e3b", "e3c", "e3d", "e3g", "e3", "e-3", "sentry",
     
-    # P-8 / P-3 / EP-3 関連
-    "p8a", "p8", "p-8", "p3", "ep3", "ep-3",
-    
-    # E-4 / VC-25 / E-6 / E-8 / 輸送・大型機
+    # E-4 / VC-25 / E-6 / E-8 / その他大型司令部機
     "e4", "e4b", "e-4b", "vc25", "vc25a", "vc-25a", "vc25b", "vc-25b",
-    "e6", "e-6", "e6b", "e-6b", "e8", "e-8", "e8c", "e-8c", "c17", "c130", "b52"
+    "e6", "e-6", "e6b", "e-6b", "e8", "e-8", "e8c", "e-8c", "b52"
 ]
 
-# 明確に除外したい機種
+# 【要請対応】明確に除外したい機種（C-17, P-8 を追加して完全に弾く）
 EXCLUDE_TYPES = [
+    "c17", "c-17", "globemaster",
+    "p8a", "p8", "p-8", "poseidon",
     "e390", "e-390", "kc390", "kc-390", "c390", "c-390",
     "h60", "h-60", "mh60", "mh-60", "sh60", "sh-60", "hh60", "hh-60", "uh60", "uh-60",
     "blackhawk", "seahawk", "jayhawk", "knighthawk"
@@ -112,15 +113,17 @@ def get_embed_color(ac_type, is_japan_destination):
 
 
 def is_target_aircraft(ac):
-    """米軍特殊機専用の判定ロジック (National / RCH / REACH 除外)"""
+    """米軍特殊機専用の判定ロジック（C-17 / P-8 / National / RCH / REACH 除外）"""
     ac_type = str(ac.get("t", "")).strip().lower().replace(" ", "")
     desc = str(ac.get("desc", "")).strip().lower()
     own_op = str(ac.get("ownOp", "")).strip().lower()
     flight = str(ac.get("flight", "")).strip().lower()
 
+    # 除外対象（National, RCH, REACH）
     if "national air" in own_op or flight.startswith("ncr") or flight.startswith("rch") or flight.startswith("reach"):
         return False
 
+    # 除外機種（C-17, P-8, ヘリ等）の強制ブロック
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
@@ -146,8 +149,10 @@ def is_target_aircraft(ac):
             break
 
     if not is_target_type:
-        if any(k in ac_type or k in desc for k in ["135", "k35", "w135", "sentry", "e-3", "e-4", "e-6", "e-8", "p8"]):
-            is_target_type = True
+        # C-17やP-8を除外しつつ、他の主要対象を救うフォールバック
+        if any(k in ac_type or k in desc for k in ["135", "k35", "w135", "sentry", "e-3", "e-4", "e-6", "e-8"]):
+            if not any(ex in ac_type or ex in desc for ex in ["c17", "p8"]):
+                is_target_type = True
 
     if is_target_callsign:
         return True
@@ -281,7 +286,7 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
 def check_military_takeoff():
     global in_air_states, notified_icaos
 
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] データをチェック中...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 60秒間隔で自動チェック中...")
 
     url = "https://api.adsb.lol/v2/mil"
     try:
@@ -315,12 +320,13 @@ def check_military_takeoff():
             is_in_air_current = not is_ground
             is_in_air_last = in_air_states.get(icao)
 
+            # 「地上から空へ上がった瞬間」または「未検知の機体が空中に現れた瞬間」に自動通知
             is_takeoff = (is_in_air_last is False and is_in_air_current is True)
             is_new_detection = (icao not in notified_icaos and is_in_air_current)
 
             if is_takeoff or is_new_detection:
                 event_type = "離陸" if is_takeoff else "検知"
-                print(f"【{event_type}】 機種: {ac_type}, Tail: {tail}, Flight: {flight}")
+                print(f"【自動更新・{event_type}】 機種: {ac_type}, Tail: {tail}, Flight: {flight}")
                 
                 location_str = get_location_name(lat, lon)
                 fa_origin, destination = get_flight_route(flight)
@@ -332,6 +338,7 @@ def check_military_takeoff():
 
             in_air_states[icao] = is_in_air_current
 
+        # 一旦着陸した機体やレーダーから消えた機体は管理セットから外し、再度飛び立ったときにまた自動通知されるようにする
         notified_icaos = notified_icaos.intersection(current_batch_icaos)
 
     except Exception as e:
@@ -339,7 +346,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print(f"米軍機・特殊機の強化監視を開始しました... 間隔: {CHECK_INTERVAL}秒")
+    print(f"米軍機・特殊機（C-17/P-8除外・60秒自動更新）の監視を開始しました。")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
