@@ -1,77 +1,11 @@
 import os
 import time
-from datetime import datetime
-import requests
-
-# === 設定項目 ===
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
-
-if not DISCORD_WEBHOOK_URL:
-    raise ValueError("エラー: DISCORD_WEBHOOK_URL が設定されていないよ！")
-
-# テスト済みかどうかのフラグ
-test_notified = False
-
-def send_test_notification():
-    """1分後のテスト用通知"""
-    payload = {
-        "content": "✈️ **【1分後テスト通知】60秒の自動ループとDiscord送信が正常に機能しています！**",
-        "embeds": [{
-            "title": "✈️ テスト機体ステータス詳細",
-            "color": 0xE67E22,
-            "fields": [
-                {"name": "機体型式 (Type)", "value": "KC135 (テスト)", "inline": True},
-                {"name": "所属/運用者 (Operator)", "value": "US Air Force", "inline": True},
-                {"name": "機体番号 (Tail / Reg)", "value": "TEST-1234", "inline": True},
-                {"name": "フライト番号 (Callsign)", "value": "TEST01", "inline": True},
-                {"name": "高度", "value": "25000 ft", "inline": True},
-                {"name": "📍 反応位置", "value": "テスト上空 (35.6895, 139.6917)", "inline": False},
-            ],
-            "footer": {"text": "ADSB Military Tracker - 1分後テスト"}
-        }]
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        print(f"[{time.strftime('%H:%M:%S')}] 1分後テスト通知の送信成功！")
-    except Exception as e:
-        print(f"送信エラー: {e}")
-
-def check_military_takeoff():
-    global test_notified
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 定期チェック実行中...")
-
-    # 【テスト用】まだテスト通知を送っていなければ、1回目のチェック（＝約1分後）で強制送信する
-    if not test_notified:
-        print("【テスト】強制的にテスト通知を配信します！")
-        send_test_notification()
-        test_notified = True
-        return
-
-    # 通常時の処理（実際のAPIチェック）
-    url = "https://api.adsb.lol/v2/mil"
-    try:
-        res = requests.get(url, timeout=15).json()
-        ac_list = res.get("ac", [])
-        print(f"API接続成功: 現在空中の軍用機候補 {len(ac_list)} 機")
-    except Exception as e:
-        print(f"チェック中エラー: {e}")
-
-if __name__ == "__main__":
-    print(f"1分後テストプログラムを開始しました。約60秒後にDiscordへテスト通知が飛びます。")
-    while True:
-        time.sleep(CHECK_INTERVAL)  # 最初に60秒待つことで、まさに「1分後」に動く
-        check_military_takeoff()
-import os
-import time
 import math
 import threading
-from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
-# === 1. Renderのポート検知対策＆スリープ防止用ダミーサーバー ===
+# === Renderのポート検知をクリア＆501エラー解消用ダミーサーバー ===
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -84,25 +18,23 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        pass  # サーバーアクセスのログを非表示にしてすっきりさせる
+        return  # ログをキレイに保つため無効化
 
 def start_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# バックグラウンドスレッドでダミーサーバーを常時稼働
 threading.Thread(target=start_dummy_server, daemon=True).start()
 
-# === 2. 設定項目 ===
+# === 設定項目 ===
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
-
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
-# 許可する指定運用者（純米軍 ＋ オメガタンカーのみ）
+# 1. 許可する指定運用者（National除外、純米軍＋オメガ空中給油機）
 ALLOWED_OPERATORS = [
     "us air force", "usaf", "united states air force",
     "us navy", "usn", "united states navy",
@@ -110,33 +42,35 @@ ALLOWED_OPERATORS = [
     "omega air", "omega aerial refueling", "omega tanker"
 ]
 
-# 米軍特有の代表的コールサイン
+# 2. 米軍特有の代表的コールサイン（RCH / REACH / NCR を除外）
 TARGET_CALLSIGNS = [
-    "sentry", "recon", "jake", "cobra", "snoop", "bolt", "pyton", "olay",
-    "hobo", "gold", "ethyl", "teal", "qid", "m35", "boeing"
+    "sentry",    # E-3 AWACS
+    "recon", "jake", "cobra", "snoop", "bolt", "pyton", "olay", # RC-135 / WC-135 / OC-135
+    "hobo", "gold", "ethyl", "teal", "qid", "m35", "boeing" # Tanker / C-135系 / USAF
 ]
 
-# 監視対象の機種コード（KC-135, E-3, E-4, VC-25, E-6, E-8, B-52 等）
+# 3. 監視対象の指定機種（ADS-B表記に完全対応 / W135含む軍用機メイン）
 TARGET_TYPES = [
-    # KC-135 派生 (E135系は除外へ移行)
-    "k35r", "k35q", "k35t", "kc35", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
-    "r135", "rc13", "rc135", "rc-135",
-    "w135", "wc135", "wc-135", "wc135w", "wc135c",
-    "oc135", "oc-135",
+    # C-135 派生 (KC / RC / WC / EC / OC / NC / TC / W135)
+    "k35r", "k35q", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
+    "r135", "rc135", "rc-135",
+    "w135", "wc135", "wc-135", "wc135w", "wc135c", # WC-135 (Constant Phoenix)
+    "ec135", "ec-135", "oc135", "oc-135",
     
     # E-3 (AWACS) 関連
     "e3tf", "e3cf", "e3a", "e3b", "e3c", "e3d", "e3g", "e3", "e-3", "sentry",
     
-    # E-4 / VC-25 / E-6 / E-8 / その他大型
+    # E-4 / VC-25 / E-6 / E-8 / B707派生
     "e4", "e4b", "e-4b", "vc25", "vc25a", "vc-25a", "vc25b", "vc-25b",
-    "e6", "e-6", "e6b", "e-6b", "e8", "e-8", "e8c", "e-8c", "b52"
+    "b707", "b-707", "b703", "b-703", "boeing707", "boeing 707",
+    "e6", "e-6", "e6b", "e-6b", "e8", "e-8", "e8c", "e-8c", "c137", "c-137",
+
+    # KDC-10 / DC-10 タンク機
+    "kdc10", "kdc-10", "dc10", "dc-10", "dc103"
 ]
 
-# 【要請対応】E135系、C-17、P-8、ヘリ等を完全に除外
+# 4. 明確に除外したい機種（ヘリ・小型機・E390等）
 EXCLUDE_TYPES = [
-    "ec135", "ec-135",  # E135系を完全除外
-    "c17", "c-17", "globemaster",
-    "p8a", "p8", "p-8", "poseidon",
     "e390", "e-390", "kc390", "kc-390", "c390", "c-390",
     "h60", "h-60", "mh60", "mh-60", "sh60", "sh-60", "hh60", "hh-60", "uh60", "uh-60",
     "blackhawk", "seahawk", "jayhawk", "knighthawk"
@@ -145,56 +79,77 @@ EXCLUDE_TYPES = [
 if not DISCORD_WEBHOOK_URL:
     raise ValueError("エラー: DISCORD_WEBHOOK_URL が設定されていません。")
 
+# 機体の状態管理（前回高度情報＆通知済みリスト）
 in_air_states = {}
 notified_icaos = set()
 
 
+def send_startup_notification():
+    """Live化した瞬間に1回だけ送る接続テスト通知"""
+    payload = {
+        "content": "🚀 **【システム起動成功】米軍・オメガ機 監視プログラムがLive化しました！**",
+        "embeds": [{
+            "title": "🚀 起動・接続テスト",
+            "color": 0x2ECC71,
+            "fields": [
+                {"name": "ステータス", "value": "ダミーサーバー & 監視ループ稼働中", "inline": True},
+                {"name": "更新間隔", "value": f"{CHECK_INTERVAL}秒", "inline": True},
+                {"name": "時刻", "value": time.strftime('%H:%M:%S'), "inline": True},
+            ],
+            "footer": {"text": "ADSB Military Tracker"}
+        }]
+    }
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        print(f"[{time.strftime('%H:%M:%S')}] 起動直後テスト通知の送信成功！")
+    except Exception as e:
+        print(f"起動テスト送信エラー: {e}")
+
+
 def get_embed_color(ac_type, is_japan_destination):
-    """機種や目的地に応じてEmbed通知の枠線の色を切り替える"""
+    """機種や目的地に応じてEmbed通知の枠線の色（HEXカラーコード）を切り替える"""
     if is_japan_destination:
         return 0xFF0000  # 赤色（日本目的地・最高警戒）
 
     type_clean = ac_type.lower().replace(" ", "").replace("-", "")
 
-    if any(k in type_clean for k in ["w135", "wc135", "r135", "rc13", "rc135", "oc135", "ep3"]):
-        return 0x9B59B6
+    if any(k in type_clean for k in ["w135", "wc135", "r135", "rc135", "oc135", "ec135"]):
+        return 0x9B59B6  # 紫色
 
     if any(k in type_clean for k in ["e3", "sentry"]):
-        return 0xF1C40F
+        return 0xF1C40F  # 黄色
 
-    if any(k in type_clean for k in ["k35", "kc35", "kc135", "c135"]):
-        return 0xE67E22
+    if any(k in type_clean for k in ["k35", "kc135", "c135", "kdc10", "dc10"]):
+        return 0xE67E22  # オレンジ色
 
     if any(k in type_clean for k in ["e4", "vc25", "e6", "e8"]):
-        return 0x900C3F
+        return 0x900C3F  # 濃い赤
 
-    return 0x3498DB
+    return 0x3498DB  # 青色
 
 
 def is_target_aircraft(ac):
-    """米軍・オメガタンカー専用の判定ロジック（E135 / C-17 / P-8 / National等除外）"""
     ac_type = str(ac.get("t", "")).strip().lower().replace(" ", "")
     desc = str(ac.get("desc", "")).strip().lower()
     own_op = str(ac.get("ownOp", "")).strip().lower()
     flight = str(ac.get("flight", "")).strip().lower()
 
-    # 民間・チャーター・輸送系除外
     if "national air" in own_op or flight.startswith("ncr") or flight.startswith("rch") or flight.startswith("reach"):
         return False
 
-    # 除外機種（E135系、C-17、P-8、ヘリ等）の強制ブロック
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
             exclude in desc or exclude_clean in desc):
             return False
 
-    # 運用者が米軍またはオメガ系であることの厳格チェック
-    is_allowed_op = any(op in own_op for op in ALLOWED_OPERATORS)
-    if not is_allowed_op:
-        return False  # 所属が米軍・オメガ以外ならここで確実に弾く
-
     is_target_callsign = any(cs in flight for cs in TARGET_CALLSIGNS)
+
+    is_allowed_op = False
+    if own_op:
+        is_allowed_op = any(op in own_op for op in ALLOWED_OPERATORS)
+    else:
+        is_allowed_op = True
 
     desc_clean = desc.replace(" ", "").replace("-", "")
     is_target_type = False
@@ -207,11 +162,13 @@ def is_target_aircraft(ac):
             break
 
     if not is_target_type:
-        if any(k in ac_type or k in desc for k in ["k35", "w135", "sentry", "e-3", "e-4", "e-6", "e-8"]):
-            if not any(ex in ac_type or ex in desc for ex in ["c17", "p8", "ec135"]):
-                is_target_type = True
+        if any(k in ac_type or k in desc for k in ["135", "w135", "sentry", "boeing707", "b707", "kdc10", "vc25", "e-3", "e-4", "e-6", "e-8"]):
+            is_target_type = True
 
-    if is_target_callsign or is_target_type:
+    if is_target_callsign:
+        return True
+
+    if is_allowed_op and is_target_type:
         return True
 
     return False
@@ -295,7 +252,7 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
     flight_str = flight if flight else "不明"
     tail_str = tail if tail else "不明"
     type_str = ac_type if ac_type else "対象機"
-    op_str = own_op if own_op else "米軍/オメガ"
+    op_str = own_op if own_op else "米軍/関連機関"
     direction_str = get_direction_text(track)
     is_japan_airport = is_destination_japan_airport(destination)
 
@@ -304,7 +261,7 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
     if is_japan_airport:
         content_text = f"🚨 **【重要】{type_str} ({tail_str}) の目的地が「日本の空港 ({destination})」に設定されました！** @everyone"
     else:
-        content_text = f"✈️ **【米軍機/オメガ{event_type}】{type_str}: {tail_str} (Callsign: {flight_str})**"
+        content_text = f"✈️ **【米軍機{event_type}】{type_str}: {tail_str} (Callsign: {flight_str})**"
 
     payload = {
         "content": content_text,
@@ -337,8 +294,6 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
 
 def check_military_takeoff():
     global in_air_states, notified_icaos
-
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 米軍・オメガ機を自動チェック中...")
 
     url = "https://api.adsb.lol/v2/mil"
     try:
@@ -377,7 +332,7 @@ def check_military_takeoff():
 
             if is_takeoff or is_new_detection:
                 event_type = "離陸" if is_takeoff else "検知"
-                print(f"【自動更新・{event_type}】 機種: {ac_type}, Tail: {tail}, Flight: {flight}")
+                print(f"【{event_type}】 機種: {ac_type}, Tail: {tail}, Flight: {flight}")
                 
                 location_str = get_location_name(lat, lon)
                 fa_origin, destination = get_flight_route(flight)
@@ -396,7 +351,12 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print(f"米軍・オメガタンカー限定監視（E135除外・60秒自動更新）を開始しました。")
+    print("米軍機・特殊機（USAF, Navy, USMC, Omega Tanker）の監視システムを開始しました...")
+    
+    # Liveになった瞬間に起動テスト通知を即座に送信
+    send_startup_notification()
+    
+    # 以降は60秒おきにループ
     while True:
-        check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
+        check_military_takeoff()
