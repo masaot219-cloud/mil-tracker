@@ -1,10 +1,68 @@
 import os
+import time
+from datetime import datetime
 import requests
 
-# テスト用の簡易通知（環境変数が正しく読めているか、Discordに届くかの確認）
-webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
-res = requests.post(webhook_url, json={"content": "🚨 **【テスト通知】Discord連携は正常に生きています！**"})
-print("テスト送信結果:", res.status_code)
+# === 設定項目 ===
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
+
+if not DISCORD_WEBHOOK_URL:
+    raise ValueError("エラー: DISCORD_WEBHOOK_URL が設定されていないよ！")
+
+# テスト済みかどうかのフラグ
+test_notified = False
+
+def send_test_notification():
+    """1分後のテスト用通知"""
+    payload = {
+        "content": "✈️ **【1分後テスト通知】60秒の自動ループとDiscord送信が正常に機能しています！**",
+        "embeds": [{
+            "title": "✈️ テスト機体ステータス詳細",
+            "color": 0xE67E22,
+            "fields": [
+                {"name": "機体型式 (Type)", "value": "KC135 (テスト)", "inline": True},
+                {"name": "所属/運用者 (Operator)", "value": "US Air Force", "inline": True},
+                {"name": "機体番号 (Tail / Reg)", "value": "TEST-1234", "inline": True},
+                {"name": "フライト番号 (Callsign)", "value": "TEST01", "inline": True},
+                {"name": "高度", "value": "25000 ft", "inline": True},
+                {"name": "📍 反応位置", "value": "テスト上空 (35.6895, 139.6917)", "inline": False},
+            ],
+            "footer": {"text": "ADSB Military Tracker - 1分後テスト"}
+        }]
+    }
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        print(f"[{time.strftime('%H:%M:%S')}] 1分後テスト通知の送信成功！")
+    except Exception as e:
+        print(f"送信エラー: {e}")
+
+def check_military_takeoff():
+    global test_notified
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 定期チェック実行中...")
+
+    # 【テスト用】まだテスト通知を送っていなければ、1回目のチェック（＝約1分後）で強制送信する
+    if not test_notified:
+        print("【テスト】強制的にテスト通知を配信します！")
+        send_test_notification()
+        test_notified = True
+        return
+
+    # 通常時の処理（実際のAPIチェック）
+    url = "https://api.adsb.lol/v2/mil"
+    try:
+        res = requests.get(url, timeout=15).json()
+        ac_list = res.get("ac", [])
+        print(f"API接続成功: 現在空中の軍用機候補 {len(ac_list)} 機")
+    except Exception as e:
+        print(f"チェック中エラー: {e}")
+
+if __name__ == "__main__":
+    print(f"1分後テストプログラムを開始しました。約60秒後にDiscordへテスト通知が飛びます。")
+    while True:
+        time.sleep(CHECK_INTERVAL)  # 最初に60秒待つことで、まさに「1分後」に動く
+        check_military_takeoff()
 import os
 import time
 import math
