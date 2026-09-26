@@ -1,4 +1,11 @@
 import os
+import requests
+
+# テスト用の簡易通知（環境変数が正しく読めているか、Discordに届くかの確認）
+webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+res = requests.post(webhook_url, json={"content": "🚨 **【テスト通知】Discord連携は正常に生きています！**"})
+print("テスト送信結果:", res.status_code)
+import os
 import time
 import math
 import threading
