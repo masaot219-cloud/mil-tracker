@@ -6,7 +6,7 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
-# === Renderのポート検知をクリア＆501エラー解消用ダミーサーバー ===
+# === 1. Renderのポート検知対策＆スリープ防止用ダミーサーバー ===
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -19,16 +19,17 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        return  # ログ無効化
+        pass  # サーバーアクセスのログを非表示にしてすっきりさせる
 
 def start_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
+# バックグラウンドスレッドでダミーサーバーを常時稼働
 threading.Thread(target=start_dummy_server, daemon=True).start()
 
-# === 設定項目 ===
+# === 2. 設定項目 ===
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
 # CHECK_INTERVAL をデフォルト 1800 (30分) に設定
@@ -36,7 +37,7 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "1800"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
-# 1. 許可する指定運用者（National除外、純米軍＋オメガ空中給油機）
+# 許可する指定運用者（National除外、純米軍＋オメガ空中給油機）
 ALLOWED_OPERATORS = [
     "us air force", "usaf", "united states air force",
     "us navy", "usn", "united states navy",
@@ -44,14 +45,14 @@ ALLOWED_OPERATORS = [
     "omega air", "omega aerial refueling", "omega tanker"
 ]
 
-# 2. 米軍特有の代表的コールサイン（RCH / REACH / NCR を除外）
+# 米軍特有の代表的コールサイン（RCH / REACH / NCR を除外）
 TARGET_CALLSIGNS = [
     "sentry",    # E-3 AWACS
     "recon", "jake", "cobra", "snoop", "bolt", "pyton", "olay", # RC-135 / WC-135 / OC-135
     "hobo", "gold", "ethyl", "teal", "qid", "m35", "boeing" # Tanker / C-135系 / USAF
 ]
 
-# 3. 監視対象の指定機種（ADS-B表記に対応）
+# 監視対象の指定機種（ADS-B表記に対応）
 TARGET_TYPES = [
     # C-135 派生 (KC / RC / WC / EC / OC / NC / TC / W135)
     "k35r", "k35q", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
@@ -71,7 +72,7 @@ TARGET_TYPES = [
     "kdc10", "kdc-10", "dc10", "dc-10", "dc103"
 ]
 
-# 4. 明確に除外したい機種（ヘリ・小型機等）
+# 明確に除外したい機種（ヘリ・小型機等）
 EXCLUDE_TYPES = [
     "e390", "e-390", "kc390", "kc-390", "c390", "c-390",
     "h60", "h-60", "mh60", "mh-60", "sh60", "sh-60", "hh60", "hh-60", "uh60", "uh-60",
@@ -95,22 +96,22 @@ def get_embed_color(ac_type, is_japan_destination):
 
     # 1. 偵察・特殊大気採取機 (RC-135, WC-135, OC-135, W135) -> 紫色
     if any(k in type_clean for k in ["w135", "wc135", "r135", "rc135", "oc135", "ec135"]):
-        return 0x9B59B6  # 紫色
+        return 0x9B59B6
 
     # 2. 早期警戒機 (E-3 AWACS) -> 黄色
     if any(k in type_clean for k in ["e3", "sentry"]):
-        return 0xF1C40F  # 黄色
+        return 0xF1C40F
 
     # 3. 空中給油機 (KC-135, KDC-10, Omega) -> オレンジ色
     if any(k in type_clean for k in ["k35", "kc135", "c135", "kdc10", "dc10"]):
-        return 0xE67E22  # オレンジ色
+        return 0xE67E22
 
-    # 4. 司令部機 / VIP機 (E-4B, VC-25, E-6B, E-8C) -> 濃い赤/ワインレッド
+    # 4. 司令部機 / VIP機 (E-4B, VC-25, E-6B, E-8C) -> 濃い赤
     if any(k in type_clean for k in ["e4", "vc25", "e6", "e8"]):
-        return 0x900C3F  # 濃い赤
+        return 0x900C3F
 
     # 5. その他 -> 青色
-    return 0x3498DB  # 青色
+    return 0x3498DB
 
 
 def is_target_aircraft(ac):
@@ -120,28 +121,25 @@ def is_target_aircraft(ac):
     own_op = str(ac.get("ownOp", "")).strip().lower()
     flight = str(ac.get("flight", "")).strip().lower()
 
-    # --- 1. National Airlines (NCR) / 通常輸送コールサイン (RCH/REACH) 除外 ---
+    # National Airlines (NCR) / 通常輸送コールサイン (RCH/REACH) 除外
     if "national air" in own_op or flight.startswith("ncr") or flight.startswith("rch") or flight.startswith("reach"):
         return False
 
-    # --- 2. その他除外フィルター ---
+    # その他除外フィルター
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
             exclude in desc or exclude_clean in desc):
             return False
 
-    # --- 3. 判定(A): 米軍有名コールサインによるチェック ---
     is_target_callsign = any(cs in flight for cs in TARGET_CALLSIGNS)
 
-    # --- 4. 判定(B): 運用者（Operator）のチェック ---
     is_allowed_op = False
     if own_op:
         is_allowed_op = any(op in own_op for op in ALLOWED_OPERATORS)
     else:
         is_allowed_op = True
 
-    # --- 5. 判定(C): 機種コード / 説明文のチェック ---
     desc_clean = desc.replace(" ", "").replace("-", "")
     is_target_type = False
 
@@ -156,7 +154,6 @@ def is_target_aircraft(ac):
         if any(k in ac_type or k in desc for k in ["135", "w135", "sentry", "boeing707", "b707", "kdc10", "vc25", "e-3", "e-4", "e-6", "e-8"]):
             is_target_type = True
 
-    # --- 最終判定 ---
     if is_target_callsign:
         return True
 
@@ -250,7 +247,6 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
     direction_str = get_direction_text(track)
     is_japan_airport = is_destination_japan_airport(destination)
 
-    # 動的カラー適用
     embed_color = get_embed_color(type_str, is_japan_airport)
 
     if is_japan_airport:
@@ -290,7 +286,6 @@ def send_discord_notification(icao, tail, flight, ac_type, own_op, alt, track, o
 def check_military_takeoff():
     global in_air_states, notified_icaos
 
-    # チェック実行時に現在日時を出力
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] データをチェック中...")
 
     url = "https://api.adsb.lol/v2/mil"
