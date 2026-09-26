@@ -32,12 +32,11 @@ threading.Thread(target=start_dummy_server, daemon=True).start()
 # === 2. 設定項目 ===
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 FLIGHTAWARE_API_KEY = os.environ.get("FLIGHTAWARE_API_KEY")
-# CHECK_INTERVAL をデフォルト 1800 (30分) に設定
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "1800"))
 
 JAPAN_AIRPORT_PREFIXES = ("RJ", "RO")
 
-# 許可する指定運用者（National除外、純米軍＋オメガ空中給油機）
+# 許可する指定運用者
 ALLOWED_OPERATORS = [
     "us air force", "usaf", "united states air force",
     "us navy", "usn", "united states navy",
@@ -45,34 +44,32 @@ ALLOWED_OPERATORS = [
     "omega air", "omega aerial refueling", "omega tanker"
 ]
 
-# 米軍特有の代表的コールサイン（RCH / REACH / NCR を除外）
+# 米軍特有の代表的コールサイン
 TARGET_CALLSIGNS = [
-    "sentry",    # E-3 AWACS
-    "recon", "jake", "cobra", "snoop", "bolt", "pyton", "olay", # RC-135 / WC-135 / OC-135
-    "hobo", "gold", "ethyl", "teal", "qid", "m35", "boeing" # Tanker / C-135系 / USAF
+    "sentry", "recon", "jake", "cobra", "snoop", "bolt", "pyton", "olay",
+    "hobo", "gold", "ethyl", "teal", "qid", "m35", "boeing"
 ]
 
-# 監視対象の指定機種（ADS-B表記に対応）
+# 【修正・完全版】監視対象の正確な機種コード（ADS-B表記に対応）
 TARGET_TYPES = [
-    # C-135 派生 (KC / RC / WC / EC / OC / NC / TC / W135)
-    "k35r", "k35q", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
-    "r135", "rc135", "rc-135",
+    # KC-135 派生 (正しく K35R / KC35 などを網羅)
+    "k35r", "k35q", "k35t", "kc35", "c135", "c35", "kc135", "kc-135", "nc135", "tc135",
+    "r135", "rc13", "rc135", "rc-135",
     "w135", "wc135", "wc-135", "wc135w", "wc135c",
     "ec135", "ec-135", "oc135", "oc-135",
     
     # E-3 (AWACS) 関連
     "e3tf", "e3cf", "e3a", "e3b", "e3c", "e3d", "e3g", "e3", "e-3", "sentry",
     
-    # E-4 / VC-25 / E-6 / E-8 / B707派生
+    # P-8 / P-3 / EP-3 関連
+    "p8a", "p8", "p-8", "p3", "ep3", "ep-3",
+    
+    # E-4 / VC-25 / E-6 / E-8 / 輸送・大型機
     "e4", "e4b", "e-4b", "vc25", "vc25a", "vc-25a", "vc25b", "vc-25b",
-    "b707", "b-707", "b703", "b-703", "boeing707", "boeing 707",
-    "e6", "e-6", "e6b", "e-6b", "e8", "e-8", "e8c", "e-8c", "c137", "c-137",
-
-    # KDC-10 / DC-10 タンク機
-    "kdc10", "kdc-10", "dc10", "dc-10", "dc103"
+    "e6", "e-6", "e6b", "e-6b", "e8", "e-8", "e8c", "e-8c", "c17", "c130", "b52"
 ]
 
-# 明確に除外したい機種（ヘリ・小型機等）
+# 明確に除外したい機種
 EXCLUDE_TYPES = [
     "e390", "e-390", "kc390", "kc-390", "c390", "c-390",
     "h60", "h-60", "mh60", "mh-60", "sh60", "sh-60", "hh60", "hh-60", "uh60", "uh-60",
@@ -88,25 +85,25 @@ notified_icaos = set()
 
 
 def get_embed_color(ac_type, is_japan_destination):
-    """機種や目的地に応じてEmbed通知の枠線の色（HEXカラーコード）を切り替える"""
+    """機種や目的地に応じてEmbed通知の枠線の色を切り替える"""
     if is_japan_destination:
         return 0xFF0000  # 赤色（日本目的地・最高警戒）
 
     type_clean = ac_type.lower().replace(" ", "").replace("-", "")
 
-    # 1. 偵察・特殊大気採取機 (RC-135, WC-135, OC-135, W135) -> 紫色
-    if any(k in type_clean for k in ["w135", "wc135", "r135", "rc135", "oc135", "ec135"]):
+    # 1. 偵察・特殊大気採取機 -> 紫色
+    if any(k in type_clean for k in ["w135", "wc135", "r135", "rc13", "rc135", "oc135", "ec135", "ep3"]):
         return 0x9B59B6
 
     # 2. 早期警戒機 (E-3 AWACS) -> 黄色
     if any(k in type_clean for k in ["e3", "sentry"]):
         return 0xF1C40F
 
-    # 3. 空中給油機 (KC-135, KDC-10, Omega) -> オレンジ色
-    if any(k in type_clean for k in ["k35", "kc135", "c135", "kdc10", "dc10"]):
+    # 3. 空中給油機 (KC-135等) -> オレンジ色
+    if any(k in type_clean for k in ["k35", "kc35", "kc135", "c135"]):
         return 0xE67E22
 
-    # 4. 司令部機 / VIP機 (E-4B, VC-25, E-6B, E-8C) -> 濃い赤
+    # 4. 司令部機 / VIP機 -> 濃い赤
     if any(k in type_clean for k in ["e4", "vc25", "e6", "e8"]):
         return 0x900C3F
 
@@ -121,11 +118,9 @@ def is_target_aircraft(ac):
     own_op = str(ac.get("ownOp", "")).strip().lower()
     flight = str(ac.get("flight", "")).strip().lower()
 
-    # National Airlines (NCR) / 通常輸送コールサイン (RCH/REACH) 除外
     if "national air" in own_op or flight.startswith("ncr") or flight.startswith("rch") or flight.startswith("reach"):
         return False
 
-    # その他除外フィルター
     for exclude in EXCLUDE_TYPES:
         exclude_clean = exclude.replace("-", "")
         if (exclude in ac_type or exclude_clean in ac_type or
@@ -151,7 +146,7 @@ def is_target_aircraft(ac):
             break
 
     if not is_target_type:
-        if any(k in ac_type or k in desc for k in ["135", "w135", "sentry", "boeing707", "b707", "kdc10", "vc25", "e-3", "e-4", "e-6", "e-8"]):
+        if any(k in ac_type or k in desc for k in ["135", "k35", "w135", "sentry", "e-3", "e-4", "e-6", "e-8", "p8"]):
             is_target_type = True
 
     if is_target_callsign:
@@ -344,7 +339,7 @@ def check_military_takeoff():
 
 
 if __name__ == "__main__":
-    print(f"米軍機・特殊機の強化監視（RCH除外・色分け機能付き）を開始しました... 間隔: {CHECK_INTERVAL}秒")
+    print(f"米軍機・特殊機の強化監視を開始しました... 間隔: {CHECK_INTERVAL}秒")
     while True:
         check_military_takeoff()
         time.sleep(CHECK_INTERVAL)
