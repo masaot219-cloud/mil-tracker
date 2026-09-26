@@ -1,6 +1,6 @@
+import os
 os.environ["TZ"] = "Asia/Tokyo"
 import time
-import os
 import math
 import threading
 from datetime import datetime, timezone, timedelta
@@ -285,7 +285,6 @@ def get_flight_route(flight_number):
     return "不明", "不明"
 
 
-# === 非同期によるDiscord通知送信（メイン処理のブロックを防ぎ高速化） ===
 def send_discord_notification_async(icao, tail, flight, ac_type, own_op, alt, track, origin, destination, location_str, map_image_url, event_type):
     def _send():
         flight_str = flight if flight else "不明"
@@ -380,7 +379,6 @@ def check_military_takeoff():
             is_takeoff = (is_in_air_last is False and is_in_air_current is True)
             is_new_detection = (icao not in notified_icaos and is_in_air_current)
 
-            # 1. 新規検知または離陸の通知
             if is_takeoff or is_new_detection:
                 event_type = "離陸" if is_takeoff else "検知"
                 log_info(f"【新規{event_type}捕捉】 機種: {ac_type} | Tail: {tail} | Callsign: {flight} | 高度: {alt}ft")
@@ -393,7 +391,6 @@ def check_military_takeoff():
                 
                 notified_icaos.add(icao)
 
-            # 2. 高度 7,500 ft 未満降下時の着陸警戒通知
             if is_in_air_current and isinstance(alt, (int, float)) and alt <= 7500:
                 if icao not in low_altitude_notified:
                     log_alert(f"【降下警戒】 機種: {ac_type} | Tail: {tail} | 高度低下: {alt} ft")
